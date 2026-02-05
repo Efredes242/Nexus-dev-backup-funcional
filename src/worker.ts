@@ -510,11 +510,11 @@ app.get('/api/parties/:partyId/installments', authMiddleware, async (c) => {
     return c.json(enrichedPlans);
 });
 
-// Create Installment Plan (Multi-Participant Support)
+// Create Installment Plan (Multi-Participant Support + Currency)
 app.post('/api/parties/:partyId/installments', authMiddleware, async (c) => {
     const { partyId } = c.req.param();
     const body = await c.req.json();
-    const { description, totalAmount, installments, payerId, participantIds, debtorId, startMonth } = body;
+    const { description, totalAmount, installments, payerId, participantIds, debtorId, startMonth, currency, exchangeRate } = body;
 
     // Backward compatibility: support old debtorId format
     const participants = participantIds || (debtorId ? [debtorId] : []);
@@ -525,25 +525,36 @@ app.post('/api/parties/:partyId/installments', authMiddleware, async (c) => {
 
     const id = crypto.randomUUID();
     const createdAt = Date.now();
-    // participantIds contains only debtors, not the payer
-    // Total people splitting the cost = participants + payer
     const totalPeople = participants.length + 1;
     const perPersonAmount = totalAmount / (totalPeople * installments);
     const participantsJson = JSON.stringify(participants);
+
+    // Default currency and rate if not provided
+    const planCurrency = currency || 'ARS';
+    const planRate = exchangeRate || 1;
+
+    console.log('[POST /installments] Payload:', JSON.stringify({
+        partyId, description, totalAmount, installments, payerId, participantIds,
+        planCurrency, planRate, startMonth
+    }, null, 2));
 
     try {
         const user = c.get('user');
         const createdBy = user.id;
 
-        await c.env.DB.prepare(
-            'INSERT INTO installment_plans (id, party_id, description, total_amount, installments_count, installment_amount, payer_id, debtor_id, participants, start_date, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        const stmt = c.env.DB.prepare(
+            'INSERT INTO installment_plans (id, party_id, description, total_amount, installments_count, installment_amount, payer_id, debtor_id, participants, start_date, created_at, created_by, currency, exchange_rate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         )
-            .bind(id, partyId, description, totalAmount, installments, perPersonAmount, payerId, participants[0], participantsJson, startMonth, createdAt, createdBy)
-            .run();
+            .bind(id, partyId, description, totalAmount, installments, perPersonAmount, payerId, participants[0], participantsJson, startMonth, createdAt, createdBy, planCurrency, planRate);
+
+        console.log('[POST /installments] Executing DB Insert...');
+        await stmt.run();
+        console.log('[POST /installments] Success!');
 
         return c.json({ id, success: true });
     } catch (error: any) {
         console.error('Error creating installment plan:', error);
+        console.error('Stack:', error.stack);
         return c.json({ error: 'Failed to create plan', details: error.message }, 500);
     }
 });
@@ -553,7 +564,7 @@ app.put('/api/parties/:partyId/installments/:id', authMiddleware, async (c) => {
     const { partyId, id } = c.req.param();
     const user = c.get('user');
     const body = await c.req.json();
-    const { description, totalAmount, installments, payerId, participantIds, debtorId, startMonth } = body;
+    const { description, totalAmount, installments, payerId, participantIds, debtorId, startMonth, currency, exchangeRate } = body;
 
     // Check ownership
     const existing = await c.env.DB.prepare('SELECT created_by FROM installment_plans WHERE id = ?').bind(id).first();
@@ -566,11 +577,14 @@ app.put('/api/parties/:partyId/installments/:id', authMiddleware, async (c) => {
     const perPersonAmount = totalAmount / (totalPeople * installments);
     const participantsJson = JSON.stringify(participants);
 
+    const planCurrency = currency || 'ARS';
+    const planRate = exchangeRate || 1;
+
     try {
         await c.env.DB.prepare(
-            'UPDATE installment_plans SET description = ?, total_amount = ?, installments_count = ?, installment_amount = ?, payer_id = ?, debtor_id = ?, participants = ?, start_date = ? WHERE id = ?'
+            'UPDATE installment_plans SET description = ?, total_amount = ?, installments_count = ?, installment_amount = ?, payer_id = ?, debtor_id = ?, participants = ?, start_date = ?, currency = ?, exchange_rate = ? WHERE id = ?'
         )
-            .bind(description, totalAmount, installments, perPersonAmount, payerId, participants[0], participantsJson, startMonth, id)
+            .bind(description, totalAmount, installments, perPersonAmount, payerId, participants[0], participantsJson, startMonth, planCurrency, planRate, id)
             .run();
 
         return c.json({ success: true });

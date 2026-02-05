@@ -3,6 +3,7 @@ export enum CategoryType {
   INCOME = 'Ingresos',
   FIXED_EXPENSE = 'Gastos Fijos',
   VARIABLE_EXPENSE = 'Gastos Variables',
+  SHARED_EXPENSE = 'Gastos Compartidos',
   DEBT = 'Deudas',
   SAVINGS = 'Ahorros'
 }
@@ -119,6 +120,10 @@ export const DEFAULT_CATEGORY_MAP: Record<CategoryType, string[]> = {
     'Farmacia / Salud', 'Ropa', 'Mantenimiento Hogar', 'Mascotas',
     'Regalos', 'Cuidado Personal', 'Deportes', 'Educación / Cursos',
     'Vacaciones', 'Varios'
+  ],
+  [CategoryType.SHARED_EXPENSE]: [
+    'Cena Amigos', 'Regalo Grupal', 'Viaje', 'Supermercado Compartido',
+    'Servicios Compartidos', 'Alquiler Cancha', 'Evento', 'Compra Mayorista'
   ],
   [CategoryType.DEBT]: ['Préstamo Personal', 'Tarjeta de Crédito', 'Deuda Familiar'],
   [CategoryType.SAVINGS]: ['Fondo de Emergencia', 'Ahorro Dólares', 'Inversiones', 'Vacaciones', 'Auto Nuevo']

@@ -319,7 +319,13 @@ export const PartyView: React.FC<{ user: any, currentMonth?: string }> = ({ user
 
             if (currentIdx >= startIdx && currentIdx <= endIdx) {
                 // Active this month!
-                const monthlyInstallmentAmount = plan.installment_amount; // Amount per person per month
+                let monthlyInstallmentAmount = plan.installment_amount; // Amount per person per month
+
+                // Currency Conversion
+                if (plan.currency === 'USD') {
+                    monthlyInstallmentAmount = monthlyInstallmentAmount * (plan.exchange_rate || 1);
+                }
+
                 const payerId = plan.payer_id;
 
                 // Get participants (could be in 'participants' field or fallback to debtor_id)

@@ -26,6 +26,8 @@ interface MonthlyProjection {
         id: string;
         description: string;
         amount: number;
+        originalAmount?: number;
+        currency?: string;
         type: 'pay' | 'receive';
         fromTo: string;
     }[];
@@ -63,12 +65,21 @@ export const InstallmentSimulator: React.FC<{
     };
 
     // Form State
+    // Find my member ID
+    const myMemberId = React.useMemo(() => {
+        const me = members.find(m => m.user_id === currentUser.id);
+        return me ? (me.id || me.memberId) : currentUser.id;
+    }, [members, currentUser.id]);
+
     const [description, setDescription] = useState('');
     const [amount, setAmount] = useState('');
     const [installments, setInstallments] = useState('1');
-    const [payerId, setPayerId] = useState(currentUser.id);
+    const [payerId, setPayerId] = useState(myMemberId || ((members[0]?.id || members[0]?.memberId) || currentUser.id));
     const [participantIds, setParticipantIds] = useState<string[]>([]);
     const [startMonth, setStartMonth] = useState(new Date().toISOString().slice(0, 7)); // YYYY-MM
+    const [currency, setCurrency] = useState('ARS');
+    const [exchangeRate, setExchangeRate] = useState('');
+    const [estimatedRate, setEstimatedRate] = useState(''); // Visual match for UI
 
     // Projection
     const [projection, setProjection] = useState<MonthlyProjection[]>([]);
@@ -79,19 +90,9 @@ export const InstallmentSimulator: React.FC<{
 
     const loadItems = async () => {
         try {
-            console.log('Loading items, api object:', api);
             setLoading(true);
-            if (!api.getInstallmentPlans) {
-                console.error('API method getInstallmentPlans missing!', api);
-                alert('Error crítico: Versión desactualizada. Por favor recarga la página.');
-                return;
-            }
+            if (!api.getInstallmentPlans) return;
             const data = await api.getInstallmentPlans(partyId);
-            // Map keys from snake_case to camelCase if needed, but worker returns whatever DB matches.
-            // Our worker INSERTs snake_case but SELECT * returns cols.
-            // NOTE: D1 returns columns as stored. Our migration created `total_amount`, `party_id` etc.
-            // We need to map them to our interface or update interface. 
-            // Let's map them here to be safe and consistent with UI code.
             const mappedItems = (data as any[]).map((d: any) => ({
                 id: d.id,
                 description: d.description,
@@ -102,7 +103,9 @@ export const InstallmentSimulator: React.FC<{
                 debtorId: d.debtor_id,
                 startDate: d.start_date,
                 createdBy: d.created_by,
-                participants: d.participants
+                participants: d.participants,
+                currency: d.currency || 'ARS',
+                exchangeRate: d.exchange_rate || 1
             }));
             setItems(mappedItems);
         } catch (error) {
@@ -121,15 +124,7 @@ export const InstallmentSimulator: React.FC<{
         try {
             const total = parseFloat(amount);
             const count = parseInt(installments);
-
-            // Calculate how many people split the cost
-            // If payer is in participants, total people = participantIds.length
-            // If payer is NOT in participants, total people = participantIds.length + 1 (payer pays their share + gets reimbursed)
-            // Actually, for correct 50/50: if there are 2 people total, each pays half
-            // participantIds should include ONLY the debtors (people who owe), not the payer
-            // So if it's 50/50: participantIds = [debtor], total people = 2 (payer + debtor)
-            const totalPeople = participantIds.length + 1; // +1 for the payer
-            const perPersonAmount = total / (totalPeople * count);
+            const rate = parseFloat(exchangeRate) || 1;
 
             const payload = {
                 description,
@@ -137,7 +132,9 @@ export const InstallmentSimulator: React.FC<{
                 installments: count,
                 payerId,
                 participantIds,
-                startMonth
+                startMonth,
+                currency,
+                exchangeRate: currency === 'USD' ? rate : 1
             };
 
             if (editingId) {
@@ -149,9 +146,12 @@ export const InstallmentSimulator: React.FC<{
             // Reset Form and State
             setDescription('');
             setAmount('');
-            setInstallments('12');
+            setInstallments('1');
             setParticipantIds([]);
             setEditingId(null);
+            setCurrency('ARS');
+            setExchangeRate('');
+            setEstimatedRate('');
             loadItems();
         } catch (e) {
             console.error('Error saving installment plan:', e);
@@ -180,8 +180,15 @@ export const InstallmentSimulator: React.FC<{
 
         items.forEach(item => {
             const [startYear, startMonth] = item.startDate.split('-').map(Number);
-            // Get participants array from item (backend now returns this)
             const participants = (item as any).participants || [item.debtorId];
+
+            // CORRECT CALCULATION LOGIC
+            // The item.installmentAmount is in the PLAN's currency (e.g., 20 USD).
+            // We need to convert it to ARS for the "netAmount" summation.
+            const rate = (item as any).exchangeRate || 1;
+            const isUSD = (item as any).currency === 'USD';
+            const installmentAmountNative = item.installmentAmount;
+            const installmentAmountARS = isUSD ? installmentAmountNative * rate : installmentAmountNative;
 
             for (let i = 0; i < item.installments; i++) {
                 let month = startMonth + i;
@@ -196,7 +203,7 @@ export const InstallmentSimulator: React.FC<{
                     projections[monthKey] = {
                         month: monthKey,
                         items: [],
-                        netAmount: 0
+                        netAmount: 0 // Always in ARS
                     };
                 }
 
@@ -204,35 +211,35 @@ export const InstallmentSimulator: React.FC<{
                 const isParticipantMe = participants.includes(currentUser.id);
 
                 if (isPayerMe) {
-                    // I Paid, so I receive from each participant
                     participants.forEach((participantId: string) => {
                         projections[monthKey].items.push({
                             id: item.id,
                             description: `${item.description} (${i + 1}/${item.installments})`,
-                            amount: item.installmentAmount,
+                            amount: installmentAmountARS, // Store ARS for consistency in sorting/display logic potentially
+                            originalAmount: installmentAmountNative, // Keep original
+                            currency: (item as any).currency || 'ARS',
                             type: 'receive',
                             fromTo: getMemberName(participantId)
                         });
-                        projections[monthKey].netAmount += item.installmentAmount;
+                        projections[monthKey].netAmount += installmentAmountARS;
                     });
                 } else if (isParticipantMe) {
-                    // I owe the Payer
                     projections[monthKey].items.push({
                         id: item.id,
                         description: `${item.description} (${i + 1}/${item.installments})`,
-                        amount: item.installmentAmount,
+                        amount: installmentAmountARS,
+                        originalAmount: installmentAmountNative,
+                        currency: (item as any).currency || 'ARS',
                         type: 'pay',
                         fromTo: getMemberName(item.payerId)
                     });
-                    projections[monthKey].netAmount -= item.installmentAmount;
+                    projections[monthKey].netAmount -= installmentAmountARS;
                 }
-                // If neither, I don't see it (it's between others)
             }
         });
 
         const sortedProjections = Object.values(projections).sort((a, b) => a.month.localeCompare(b.month));
 
-        // Filter by currentMonth if present
         const finalProjections = currentMonth
             ? sortedProjections.filter(p => p.month === currentMonth)
             : sortedProjections;
@@ -241,7 +248,11 @@ export const InstallmentSimulator: React.FC<{
 
     }, [items, currentUser.id, currentMonth]);
 
-    const totalItemsAmount = items.reduce((sum, item) => sum + item.totalAmount, 0);
+    const totalItemsAmount = items.reduce((sum, item) => {
+        // Approximate total in ARS for summary
+        const rate = (item as any).exchangeRate || 1;
+        return sum + (item.totalAmount * rate);
+    }, 0);
 
     if (loading && items.length === 0) {
         return <div className="p-8 text-center text-slate-400 flex flex-col items-center">
@@ -265,10 +276,12 @@ export const InstallmentSimulator: React.FC<{
                                 setEditingId(null);
                                 setDescription('');
                                 setAmount('');
-                                setInstallments('1'); // Reset to default
-                                setPayerId(currentUser.id); // Reset to current user
+                                setCurrency('ARS');
+                                setExchangeRate('');
+                                setEstimatedRate('');
+                                setInstallments('1');
+                                setPayerId(currentUser.id);
                                 setParticipantIds([]);
-                                setStartMonth(new Date().toISOString().slice(0, 7)); // Reset to current month
                             }}
                             className="text-xs text-red-400 hover:text-red-300 font-medium px-2 py-1 bg-red-500/10 rounded-lg transition-colors"
                         >
@@ -277,37 +290,107 @@ export const InstallmentSimulator: React.FC<{
                     )}
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
-                    <input
-                        type="text"
-                        placeholder="Descripción"
-                        value={description}
-                        onChange={e => setDescription(e.target.value)}
-                        className="bg-slate-900/50 border border-white/10 rounded-xl px-4 py-2 text-white outline-none focus:ring-2 focus:ring-teal-500"
-                    />
-                    <input
-                        type="number"
-                        placeholder="Monto Total"
-                        value={amount}
-                        onChange={e => setAmount(e.target.value)}
-                        className="bg-slate-900/50 border border-white/10 rounded-xl px-4 py-2 text-white outline-none focus:ring-2 focus:ring-teal-500"
-                    />
-                    <select
-                        value={installments}
-                        onChange={e => setInstallments(e.target.value)}
-                        className="bg-slate-900/50 border border-white/10 rounded-xl px-4 py-2 text-white outline-none focus:ring-2 focus:ring-teal-500"
-                    >
-                        {[1, 2, 3, 6, 9, 12, 18, 24].map(n => (
-                            <option key={n} value={n}>{n} Cuotas</option>
-                        ))}
-                    </select>
-                    <input
-                        type="month"
-                        value={startMonth}
-                        onChange={e => setStartMonth(e.target.value)}
-                        className="bg-slate-900/50 border border-white/10 rounded-xl px-4 py-2 text-white outline-none focus:ring-2 focus:ring-teal-500"
-                    />
+                {/* --- REFINED FORM UI START --- */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    {/* Description & Plan Config (Out of the styled box for cleaner look, or inside? User screenshot shows only the Amount/Rate box. Let's keep Desc/Plan separate above.) */}
+                    <div className="space-y-1">
+                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Descripción</label>
+                        <input
+                            type="text"
+                            placeholder="Ej: Compra Supermercado"
+                            value={description}
+                            onChange={e => setDescription(e.target.value)}
+                            className="w-full bg-slate-900/50 border border-white/10 rounded-xl px-4 py-3 text-white outline-none focus:ring-2 focus:ring-teal-500"
+                        />
+                    </div>
+                    <div className="space-y-1">
+                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Plan</label>
+                        <div className="flex gap-2">
+                            <select
+                                value={installments}
+                                onChange={e => setInstallments(e.target.value)}
+                                className="flex-1 bg-slate-900/50 border border-white/10 rounded-xl px-4 py-3 text-white outline-none focus:ring-2 focus:ring-teal-500"
+                            >
+                                {[1, 2, 3, 6, 9, 12, 18, 24].map(n => (
+                                    <option key={n} value={n}>{n} Cuotas</option>
+                                ))}
+                            </select>
+                            <input
+                                type="month"
+                                value={startMonth}
+                                onChange={e => setStartMonth(e.target.value)}
+                                className="w-40 bg-slate-900/50 border border-white/10 rounded-xl px-4 py-3 text-white outline-none focus:ring-2 focus:ring-teal-500"
+                            />
+                        </div>
+                    </div>
                 </div>
+
+                {/* Styled Currency/Amount Box (Matching Screenshot) */}
+                <div className="bg-slate-800/50 p-4 rounded-xl border border-white/5 mb-6 space-y-4">
+                    <div className="flex gap-4">
+                        {/* Currency Selector */}
+                        <div className="w-1/3 space-y-1">
+                            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Moneda</label>
+                            <select
+                                className="w-full bg-slate-900 rounded-xl p-3 border border-white/5 focus:border-blue-500 outline-none text-xs font-black text-white appearance-none"
+                                value={currency}
+                                onChange={e => setCurrency(e.target.value)}
+                            >
+                                <option value="ARS">ARS</option>
+                                <option value="USD">USD</option>
+                            </select>
+                        </div>
+
+                        {/* Amount Input */}
+                        <div className="flex-1 space-y-1">
+                            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Monto {currency}</label>
+                            <input
+                                type="number"
+                                className={`w-full bg-slate-900 rounded-xl p-3 border border-white/5 focus:border-blue-500 outline-none font-black text-lg ${currency === 'USD' ? 'text-green-400' : 'text-blue-400'}`}
+                                value={amount}
+                                onChange={e => setAmount(e.target.value)}
+                                placeholder="0.00"
+                            />
+                        </div>
+                    </div>
+
+                    {/* Exchange Rates and Total (Conditional) */}
+                    {currency === 'USD' && (
+                        <div className="grid grid-cols-2 gap-4 animate-in fade-in slide-in-from-top-2">
+                            {/* Estimated Rate */}
+                            <div className="space-y-1">
+                                <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Cotiz. Estimada</label>
+                                <input
+                                    type="number"
+                                    placeholder="0.00"
+                                    value={estimatedRate}
+                                    onChange={e => setEstimatedRate(e.target.value)}
+                                    className="w-full bg-slate-900 rounded-xl p-3 border border-white/5 focus:border-blue-500 outline-none text-sm font-bold text-slate-500"
+                                />
+                            </div>
+                            {/* Actual Rate */}
+                            <div className="space-y-1">
+                                <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest text-blue-400">Cotiz. Real (Compra)</label>
+                                <input
+                                    type="number"
+                                    placeholder="Ej: 1215"
+                                    value={exchangeRate}
+                                    onChange={e => setExchangeRate(e.target.value)}
+                                    className="w-full bg-slate-900 rounded-xl p-3 border border-blue-500/50 focus:border-blue-400 outline-none text-sm font-bold text-white shadow-[0_0_10px_rgba(59,130,246,0.1)]"
+                                />
+                            </div>
+
+                            {/* Calculated Total */}
+                            <div className="col-span-2 space-y-1 pt-2 border-t border-white/5">
+                                <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Total Calculado (ARS)</label>
+                                <div className="w-full bg-slate-900/30 rounded-xl p-3 border border-white/5 font-black text-blue-400 text-xl tracking-tight">
+                                    ${(parseFloat(amount || '0') * (parseFloat(exchangeRate || '0') || 0)).toLocaleString('es-AR')}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+                {/* --- REFINED FORM UI END --- */}
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
                     <div>
@@ -317,7 +400,6 @@ export const InstallmentSimulator: React.FC<{
                             onChange={e => {
                                 const newPayerId = e.target.value;
                                 setPayerId(newPayerId);
-                                // Remove payer from participants if selected
                                 setParticipantIds(prev => prev.filter(id => id !== newPayerId));
                             }}
                             className="w-full bg-slate-900/50 border border-white/10 rounded-xl px-4 py-2 text-white outline-none focus:ring-2 focus:ring-teal-500"
@@ -332,7 +414,9 @@ export const InstallmentSimulator: React.FC<{
                             Quiénes deben pagar su parte
                             {participantIds.length > 0 && amount && (
                                 <span className="ml-2 text-teal-400 font-semibold">
-                                    (${(parseFloat(amount || '0') / (participantIds.length * parseInt(installments || '1'))).toLocaleString(undefined, { maximumFractionDigits: 0 })} c/u por mes)
+                                    (${(
+                                        (parseFloat(amount || '0') * (currency === 'USD' ? (parseFloat(exchangeRate || '1') || 1) : 1)) / (participantIds.length * parseInt(installments || '1'))
+                                    ).toLocaleString(undefined, { maximumFractionDigits: 0 })} c/u por mes)
                                 </span>
                             )}
                         </label>
@@ -344,26 +428,15 @@ export const InstallmentSimulator: React.FC<{
                                         checked={participantIds.includes(m.id || m.memberId)}
                                         onChange={e => {
                                             const val = m.id || m.memberId;
-                                            if (e.target.checked) {
-                                                setParticipantIds(prev => [...prev, val]);
-                                            } else {
-                                                setParticipantIds(prev => prev.filter(id => id !== val));
-                                            }
+                                            if (e.target.checked) setParticipantIds(prev => [...prev, val]);
+                                            else setParticipantIds(prev => prev.filter(id => id !== val));
                                         }}
                                         className="w-4 h-4 rounded border-white/20 bg-slate-800 text-teal-500 focus:ring-2 focus:ring-teal-500"
                                     />
                                     <span className="text-sm text-white">{getMemberName(m.id || m.memberId)}</span>
                                 </label>
                             ))}
-                            {members.filter(m => (m.id || m.memberId) !== payerId).length === 0 && (
-                                <p className="text-xs text-slate-500">No hay otros miembros disponibles</p>
-                            )}
                         </div>
-                        {participantIds.length > 0 && (
-                            <p className="text-xs text-slate-400 mt-1">
-                                {participantIds.length} participante{participantIds.length > 1 ? 's' : ''} seleccionado{participantIds.length > 1 ? 's' : ''}
-                            </p>
-                        )}
                     </div>
                 </div>
 
@@ -392,32 +465,37 @@ export const InstallmentSimulator: React.FC<{
                                         {new Date(proj.month + '-02').toLocaleDateString('es-ES', { month: 'long', year: 'numeric' }).toUpperCase()}
                                     </div>
                                     <div className={`text-xl font-bold ${proj.netAmount >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                        {proj.netAmount >= 0 ? 'Recibes' : 'Pagas'} ${Math.abs(proj.netAmount).toLocaleString()}
+                                        {proj.netAmount >= 0 ? 'Recibes' : 'Pagas'} ${Math.abs(proj.netAmount).toLocaleString(undefined, { maximumFractionDigits: 0 })}
                                     </div>
                                 </div>
 
                                 <div className="space-y-2">
-                                    {proj.items.map((item, idx) => (
-                                        <div key={idx} className="flex items-center justify-between text-sm p-2 rounded hover:bg-white/5 group">
+                                    {proj.items.map((item: any, idx) => (
+                                        <div key={idx} className="flex items-center justify-between text-sm p-3 rounded-xl bg-slate-900/30 hover:bg-slate-900/50 border border-white/5 group transition-all">
                                             <div className="flex items-center gap-3">
                                                 <div className={`w-2 h-2 rounded-full ${item.type === 'receive' ? 'bg-emerald-500' : 'bg-red-500'}`} />
-                                                <span className="text-slate-300">{item.description}</span>
+                                                <span className="text-slate-200 font-medium">{item.description}</span>
                                             </div>
                                             <div className="flex items-center gap-4">
                                                 <span className="text-slate-500 text-xs text-right">
                                                     {item.type === 'receive' ? `de ${item.fromTo}` : `a ${item.fromTo}`}
                                                 </span>
-                                                <span className={`font-mono font-medium ${item.type === 'receive' ? 'text-emerald-400' : 'text-red-400'}`}>
-                                                    {item.type === 'receive' ? '+' : '-'}${item.amount.toLocaleString()}
-                                                </span>
-                                                {/* Only allow deleting if it's the first installment entry or if we identify parent? Actually we delete by Plan ID.
-                                                    But here 'item' is a projection. We need the logic to delete the PARENT plan.
-                                                    The projection item needs the PARENT ID. 
-                                                    I updated items to include ID.
-                                                    Let's add a tiny trash icon.
-                                                 */}
-                                                <button onClick={() => handleDelete(item.id)} className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-red-400 transition-opacity">
-                                                    <Trash2 className="w-3 h-3" />
+                                                <div className="text-right">
+                                                    {/* Primary Amount (ARS) */}
+                                                    <div className={`font-mono font-bold text-lg ${item.type === 'receive' ? 'text-emerald-400' : 'text-red-400'}`}>
+                                                        {item.type === 'receive' ? '+' : '-'}${Math.abs(item.amount).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                                    </div>
+                                                    {/* Secondary Amount Badge (USD) */}
+                                                    {item.currency === 'USD' && (
+                                                        <div className="flex justify-end mt-1">
+                                                            <span className="text-[10px] font-bold bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-500/30">
+                                                                USD {item.originalAmount.toFixed(2)}
+                                                            </span>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <button onClick={() => handleDelete(item.id)} className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-red-400 transition-opacity p-2">
+                                                    <Trash2 className="w-4 h-4" />
                                                 </button>
                                             </div>
                                         </div>
@@ -428,8 +506,8 @@ export const InstallmentSimulator: React.FC<{
                                             <span className="text-xs text-slate-400 uppercase font-bold">Neto Mes:</span>
                                             <span className={`font-bold ${proj.netAmount >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                                                 {proj.netAmount >= 0
-                                                    ? `Te transfieren $${proj.netAmount.toLocaleString()}`
-                                                    : `Transfieres $${Math.abs(proj.netAmount).toLocaleString()}`}
+                                                    ? `Te transfieren $${proj.netAmount.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+                                                    : `Transfieres $${Math.abs(proj.netAmount).toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
                                             </span>
                                         </div>
                                     )}
@@ -490,6 +568,8 @@ export const InstallmentSimulator: React.FC<{
                                                 // Get participants from item
                                                 const participants = item.participants || [item.debtorId];
                                                 setParticipantIds(participants);
+                                                setCurrency((item as any).currency || 'ARS');
+                                                setExchangeRate((item as any).exchangeRate ? String((item as any).exchangeRate) : '');
                                                 setEditingId(item.id);
 
                                                 // Scroll to form (to the beginning of the component)

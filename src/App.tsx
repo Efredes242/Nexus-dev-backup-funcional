@@ -134,6 +134,10 @@ const App: React.FC = () => {
   // --- PENDING INVITES STATE ---
   const [pendingInvitesCount, setPendingInvitesCount] = useState(0);
 
+  // --- PARTY STATE ---
+  const [sharedPlans, setSharedPlans] = useState<any[]>([]);
+  const [partyMembers, setPartyMembers] = useState<Record<string, Record<string, string>>>({}); // PartyID -> ID -> Name map
+
   // --- SYNC WITH DB ---
   useEffect(() => {
     if (!user) return;
@@ -149,6 +153,86 @@ const App: React.FC = () => {
           setPendingInvitesCount(invites.length);
         } catch (e) {
           console.error("Error fetching invites", e);
+        }
+
+        // --- FETCH SHARED INSTALLMENTS (NEW) ---
+        try {
+          const parties = await api.getParties();
+          const allPlans: any[] = [];
+
+          // Store names PER PARTY to support different nicknames in different groups
+          // Record<PartyID, Record<MemberID|UserID, Name>>
+          const partyMemberMap: Record<string, Record<string, string>> = {};
+          const globalUserMap: Record<string, string> = {};
+
+          // Fetch users for generic naming (optimistic)
+          try {
+            const users = await api.getUsers();
+            if (Array.isArray(users)) {
+              users.forEach((u: any) => globalUserMap[u.id] = u.firstName || u.username);
+            }
+          } catch (e) { console.warn("Could not fetch global users for naming", e); }
+
+          // Iterate parties to get nicknames and plans
+          for (const party of parties) {
+            partyMemberMap[party.id] = { ...globalUserMap }; // Start with global names
+
+            // Get Nicknames & Details (for Guests)
+            try {
+              const [nicknames, details] = await Promise.all([
+                api.getNicknames(party.id).catch(() => ({})),
+                api.getPartyDetails(party.id).catch(() => (null))
+              ]);
+
+              // 2. Map Guest/Member Names (Member ID -> Guest Name / User Name)
+              // API returns { members: [...] } or { members: { results: [...] } }
+              const membersList = details ? (Array.isArray((details as any).members) ? (details as any).members : ((details as any).members?.results || [])) : [];
+
+              const userIdToMemberId: Record<string, string> = {};
+
+              membersList.forEach((m: any) => {
+                // Track relationship for nickname mapping
+                if (m.user_id) userIdToMemberId[m.user_id] = m.id;
+
+                // Basic Name Resolution (Priority: GuestName -> FirstName -> Username)
+                const name = m.guest_name || m.firstName || m.username || m.email || m.invited_email;
+                if (name) {
+                  const cleanName = String(name).replace(/0+$/, '');
+                  partyMemberMap[party.id][m.id] = cleanName; // Map Member ID
+                  if (m.user_id) partyMemberMap[party.id][m.user_id] = cleanName; // Map User ID
+                }
+              });
+
+              // 1. Map Nicknames (Overwrite Basic Names)
+              if (nicknames && typeof nicknames === 'object') {
+                Object.entries(nicknames).forEach(([uid, nick]) => {
+                  if (typeof nick === 'string') {
+                    // Map User ID
+                    partyMemberMap[party.id][uid] = nick;
+                    // Also Map Member ID if known
+                    if (userIdToMemberId[uid]) {
+                      partyMemberMap[party.id][userIdToMemberId[uid]] = nick;
+                    }
+                  }
+                });
+              }
+
+            } catch (e) { }
+
+            // Get Plans
+            try {
+              const plans = await api.getInstallmentPlans(party.id);
+              if (Array.isArray(plans)) {
+                // Attach partyId to checks
+                plans.forEach(p => p.partyId = party.id);
+                allPlans.push(...plans);
+              }
+            } catch (e) { console.error(`Error fetching plans for party ${party.id}`, e); }
+          }
+          setSharedPlans(allPlans);
+          setPartyMembers(partyMemberMap); // Update mapping
+        } catch (e) {
+          console.error("Error fetching party data", e);
         }
 
         if (data) {
@@ -263,6 +347,104 @@ const App: React.FC = () => {
 
     // - manualCreditEntries: Todo lo que es crédito (incluyendo ingresos, para agregarlos al detalle de la tarjeta)
     const manualCreditEntries = activeManualEntries.filter(e => e.paymentMethod === PaymentMethod.CREDIT);
+
+    // --- INTEGRACIÓN DE GASTOS COMPARTIDOS (VIRTUALES) ---
+    const virtualSharedEntries: BudgetEntry[] = [];
+
+    if (sharedPlans && sharedPlans.length > 0 && user) {
+      const [currYear, currMonth] = state.currentMonth.split('-').map(Number);
+
+      sharedPlans.forEach(plan => {
+        const [startYear, startMonth] = plan.start_date.split('-').map(Number);
+        const participants = typeof plan.participants === 'string'
+          ? JSON.parse(plan.participants)
+          : (plan.participants || [plan.debtor_id]);
+
+        // Check if plan is active in current month
+        // Calculate end month
+        // Simply iterate installments to see if one falls on current month
+        // Logic adapted from InstallmentSimulator
+
+        let isActive = false;
+        let currentInstallmentNum = 0;
+
+        for (let i = 0; i < plan.installments_count; i++) {
+          let m = startMonth + i;
+          let y = startYear;
+          while (m > 12) { m -= 12; y++; }
+
+          if (m === currMonth && y === currYear) {
+            isActive = true;
+            currentInstallmentNum = i + 1;
+            break;
+          }
+        }
+
+        if (isActive) {
+          const rate = plan.exchange_rate || 1;
+          const isUSD = plan.currency === 'USD';
+          const installmentAmountNative = plan.installment_amount;
+          const installmentAmountARS = isUSD ? installmentAmountNative * rate : installmentAmountNative;
+
+          // Determine My Role (Robust naming check using Party Map)
+          const myName = user.firstName || user.username || 'Yo';
+          const partyMap = partyMembers[plan.partyId] || {}; // Get map for THIS party
+          const payerName = partyMap[plan.payer_id] || 'Miembro';
+          const isPayerMe = plan.payer_id === user.id || payerName === myName;
+
+          let isParticipantMe = participants.includes(user.id);
+          if (!isParticipantMe) {
+            // Fallback: Check if any participant ID maps to my Name in THIS party
+            isParticipantMe = participants.some((p: string) => partyMap[p] === myName);
+          }
+
+          if (isPayerMe) {
+            // I PAID -> Others owe me.
+            const pName = myName; // Me
+            participants.forEach((pId: string) => {
+              // Don't owe myself
+              if (pId === user.id || partyMap[pId] === myName) return;
+
+              const debtorName = partyMap[pId] || 'Miembro';
+              virtualSharedEntries.push({
+                id: `shared-${plan.id}-${pId}-${state.currentMonth}`,
+                name: `${plan.description} (${debtorName})`,
+                amount: -installmentAmountARS, // Negative amount = I receive = Reduces Expense
+                category: CategoryType.SHARED_EXPENSE,
+                tag: `${debtorName} le debe a ${pName}`,
+                date: `${state.currentMonth}-01`,
+                status: TransactionStatus.PENDING,
+                paymentMethod: PaymentMethod.TRANSFER,
+                currentInstallment: currentInstallmentNum,
+                totalInstallments: plan.installments_count,
+                installmentRef: plan.id,
+                currency: plan.currency,
+                originalAmount: installmentAmountNative,
+                exchangeRateActual: rate
+              });
+            });
+          } else if (isParticipantMe) {
+            // I OWE -> I pay.
+            virtualSharedEntries.push({
+              id: `shared-${plan.id}-${user.id}-${state.currentMonth}`,
+              name: `${plan.description}`,
+              amount: installmentAmountARS, // Positive amount = Cost
+              category: CategoryType.SHARED_EXPENSE,
+              tag: `${myName} le debe a ${payerName}`,
+              date: `${state.currentMonth}-01`,
+              status: TransactionStatus.PENDING,
+              paymentMethod: PaymentMethod.TRANSFER,
+              currentInstallment: currentInstallmentNum,
+              totalInstallments: plan.installments_count,
+              installmentRef: plan.id,
+              currency: plan.currency,
+              originalAmount: installmentAmountNative,
+              exchangeRateActual: rate
+            });
+          }
+        }
+      });
+    }
 
     // Generar cuotas automáticas para el mes actual
     const installmentEntries: BudgetEntry[] = [];
@@ -382,8 +564,8 @@ const App: React.FC = () => {
       });
     });
 
-    return [...manualOtherEntries, ...installmentEntries];
-  }, [state.budgets, state.currentMonth, state.installmentPurchases, state.config.creditCards]);
+    return [...manualOtherEntries, ...installmentEntries, ...virtualSharedEntries];
+  }, [state.budgets, state.currentMonth, state.installmentPurchases, state.config.creditCards, sharedPlans, user]);
 
   const confirmedTotals = useMemo(() => {
     const viewMode = state.config.viewMode || 'monthly';
@@ -407,9 +589,9 @@ const App: React.FC = () => {
         return !e.viewType || e.viewType === 'monthly';
       })
       .reduce((acc, e) => {
-      acc[e.category] = (acc[e.category] || 0) + e.amount;
-      return acc;
-    }, {} as Record<CategoryType, number>);
+        acc[e.category] = (acc[e.category] || 0) + e.amount;
+        return acc;
+      }, {} as Record<CategoryType, number>);
   }, [currentBudgetEntries, state.config.viewMode]);
 
   // Compatibility alias for existing components that expect 'currentTotals'
@@ -529,10 +711,10 @@ const App: React.FC = () => {
         if (entry.month_year) {
           targetMonth = entry.month_year;
         } else if (entry.date) {
-           const parts = entry.date.split('-');
-           if (parts.length >= 2) {
-             targetMonth = `${parts[0]}-${parts[1]}`;
-           }
+          const parts = entry.date.split('-');
+          if (parts.length >= 2) {
+            targetMonth = `${parts[0]}-${parts[1]}`;
+          }
         }
 
         const monthData = prev.budgets[targetMonth] || { month: targetMonth, entries: [] };
@@ -932,7 +1114,7 @@ const App: React.FC = () => {
                     api.saveConfig(newConfig);
                   }
                 }
-                
+
                 // Guardar entrada original
                 saveEntry(entry);
 
@@ -946,7 +1128,7 @@ const App: React.FC = () => {
                     const nextD = String(nextDate.getDate()).padStart(2, '0');
                     const dateStr = `${nextY}-${nextM}-${nextD}`;
                     const monthYearStr = `${nextY}-${nextM}`;
-                    
+
                     const newEntry = {
                       ...entry,
                       id: crypto.randomUUID(),

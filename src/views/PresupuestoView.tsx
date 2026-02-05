@@ -197,8 +197,8 @@ export const PresupuestoView: React.FC<PresupuestoViewProps> = ({
                               cat === CategoryType.INCOME ? "Registra aquí todos tus ingresos fijos (Sueldo) y variables (Ventas, Changas)." :
                                 cat === CategoryType.FIXED_EXPENSE ? "Gastos obligatorios que se repiten todos los meses (Alquiler, Internet, Seguros)." :
                                   cat === CategoryType.VARIABLE_EXPENSE ? "Gastos del día a día que varían mes a mes (Supermercado, Salidas, Regalos)." :
-                                    cat === CategoryType.SAVINGS ? "Dinero reservado para metas futuras, fondo de emergencia o inversiones." :
-                                      cat === CategoryType.CREDIT_CARD ? "Registro de consumos con tarjeta de crédito y pago de resúmenes." :
+                                    cat === CategoryType.SHARED_EXPENSE ? "Gastos compartidos con grupos (Cenas, Viajes, Regalos). Aquí verás lo que debes y te deben." :
+                                      cat === CategoryType.SAVINGS ? "Dinero reservado para metas futuras, fondo de emergencia o inversiones." :
                                         "Sección para administrar tus movimientos."
                             }
                           />
@@ -226,16 +226,18 @@ export const PresupuestoView: React.FC<PresupuestoViewProps> = ({
                         </p>
 
                       </div>
-                      <Button size="sm" variant="glass" className={`rounded-xl border ${config.border} hover:bg-white/10`} onClick={(e) => {
-                        e.stopPropagation();
-                        setEditingEntry({
-                          id: generateUUID(), name: '', amount: 0, category: cat, tag: categories[cat]?.[0] || 'General',
-                          date: currentMonth + '-01', status: TransactionStatus.PENDING, paymentMethod: PaymentMethod.CASH,
-                          viewType: initialViewMode
-                        })
-                      }}>
-                        <i className={`fas fa-plus mr-2 ${config.color}`}></i> Añadir
-                      </Button>
+                      {cat !== CategoryType.SHARED_EXPENSE && (
+                        <Button size="sm" variant="glass" className={`rounded-xl border ${config.border} hover:bg-white/10`} onClick={(e) => {
+                          e.stopPropagation();
+                          setEditingEntry({
+                            id: generateUUID(), name: '', amount: 0, category: cat, tag: categories[cat]?.[0] || 'General',
+                            date: currentMonth + '-01', status: TransactionStatus.PENDING, paymentMethod: PaymentMethod.CASH,
+                            viewType: initialViewMode
+                          })
+                        }}>
+                          <i className={`fas fa-plus mr-2 ${config.color}`}></i> Añadir
+                        </Button>
+                      )}
                     </div>
                   </div>
 
@@ -460,14 +462,21 @@ export const PresupuestoView: React.FC<PresupuestoViewProps> = ({
                                               </div>
                                             </td>
                                             <td className="hidden lg:table-cell px-8 py-4">
-                                              {e.installmentRef ? (
+                                              {e.installmentRef && e.category !== CategoryType.SHARED_EXPENSE ? (
                                                 <span className="inline-flex items-center px-2.5 py-1 bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 rounded-lg text-[10px] font-black uppercase tracking-wide">
                                                   <i className="fas fa-clock mr-1.5"></i> Cuota {e.currentInstallment}/{e.totalInstallments}
                                                 </span>
                                               ) : (
-                                                <span className="inline-flex items-center px-2.5 py-1 bg-white/5 text-slate-300 border border-white/10 rounded-lg text-[10px] font-black uppercase tracking-wide group-hover/row:border-blue-500/30 transition-colors">
-                                                  <i className="fas fa-tag mr-1.5 opacity-50"></i> {e.tag}
-                                                </span>
+                                                <div className="flex flex-col items-start gap-1">
+                                                  <span className={`inline-flex items-center px-2.5 py-1 ${e.category === CategoryType.SHARED_EXPENSE ? 'bg-teal-500/10 text-teal-400 border-teal-500/20' : 'bg-white/5 text-slate-300 border-white/10'} border rounded-lg text-[10px] font-black uppercase tracking-wide group-hover/row:border-blue-500/30 transition-colors`}>
+                                                    <i className={`fas ${e.category === CategoryType.SHARED_EXPENSE ? 'fa-user-tag' : 'fa-tag'} mr-1.5 opacity-50`}></i> {e.tag}
+                                                  </span>
+                                                  {e.installmentRef && e.category === CategoryType.SHARED_EXPENSE && (
+                                                    <span className="text-[9px] font-mono text-slate-500 ml-1">
+                                                      Cuota {e.currentInstallment}/{e.totalInstallments}
+                                                    </span>
+                                                  )}
+                                                </div>
                                               )}
                                             </td>
                                             <td className="hidden lg:table-cell px-8 py-4">
